@@ -1,0 +1,567 @@
+---
+title: "strain-1617_txn_counts_deseq2"
+author: "Shawn Higdon"
+date: "2022-11-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+```{r, message=FALSE, include=FALSE}
+packages <- c("DESeq2", "BiocParallel", "edgeR", "tidyverse")
+
+lapply(packages, library, character.only = TRUE)
+```
+
+
+## Sample map
+```{r}
+sample.map <- read_csv("./metadata/sample_map_1617.csv", col_names = TRUE)
+sample.map
+```
+
+
+## Import raw counts
+
+> Define function to read in and assemble raw count feature tables for all 3 salmon-cdhit aggregated transcriptome raw count data sets.
+
+
+```{r, message=FALSE}
+
+# Define function
+read_quant <- function (value) {
+  
+  ## define sample IDS
+  sampID <- sample.map$sample
+
+  ## make list of file pahts
+  paths <- list.files(path = paste0("counts/quant_",value),
+                      pattern = "*.counts",
+                      recursive = T, full.names = T)
+  
+  ## make list object of count tables
+  list <- lapply(paths, read_tsv)
+  
+  ## add column to every dataframe indicating the sample
+  list <- mapply(cbind, list, "sample" = sampID, SIMPLIFY = F)
+  
+  ## Create one dataframe with raw transcript counts for all 6 samples
+  df <- do.call("rbind", list)
+  
+  ## spread from long to wide format feature table & save to global env
+  df.wide <- assign(paste0("count_",value,"_df.wide"),
+                    spread(df, key = sample, value = count),
+                    envir = .GlobalEnv)
+
+}
+
+# make list of CDHIT threshold values used to aggregate each sample denovo txome into a single txome
+strains <- c("1617") # host CDHIT threshold = 1
+
+# execute the function on all 3 datasets
+for (i in strains) {
+  print(i)
+  read_quant(i)
+}
+```
+
+
+## DESeq2
+
+### Format data
+
+> * Critical for column name order of count matrix and row name in column metadata table are in conserved order.
+
+```{r}
+
+# define raw count matrix
+cts <- as.data.frame(count_1617_df.wide, row.names = count_1617_df.wide$transcript)[,2:13]
+cts.mat <- as.matrix(cts)
+head(cts.mat, 2)
+
+# define sample data (coldata) data frame
+coldata <- sample.map %>% select(sample, group, strain)
+coldata <- as.data.frame(coldata)
+rownames(coldata) <- coldata$sample
+coldata <- coldata[,-1]
+coldata$group <- factor(coldata$group)
+coldata$strain <- factor(coldata$strain)
+str(coldata)
+
+# test sample order in count matrix and coldata table
+all(rownames(coldata) %in% colnames(cts.mat))
+all(rownames(coldata) == colnames(cts.mat))
+```
+
+### Create DESeq Dataset
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = round(cts.mat),
+                              colData = coldata,
+                              design = ~ group)
+dds
+```
+
+> 4,741 transcripts across 12 samples
+
+
+### Pre-filtering
+
+> Keep rows (transcripts) that have at least 10 reads total
+
+```{r}
+keep <- rowSums(counts(dds)) >= 10
+dds2 <- dds[keep,]
+```
+
+> Resulting reduction from 4,741 to 4,671 transcripts (70 transcripts) with ≥ 10 total counts across 12 samples.
+
+### Viz
+
+> Transform raw count data
+
+```{r}
+vsd <- vst(dds2, blind = FALSE)
+head(assay(vsd),3)
+```
+
+
+#### PCA
+```{r}
+library(ggrepel)
+
+pca.1617 <- plotPCA(vsd, intgroup=c("group"))
+
+pca.1617 + geom_text_repel(aes(label = name))
+```
+
+ > run DESeq2 on filtered dataset
+ 
+```{r}
+library(BiocParallel)
+dds2 <- DESeq(dds2, parallel = TRUE, BPPARAM = MulticoreParam(6))
+```
+
+
+
+### Export counts
+```{r}
+# export as df
+normalized_counts.1617 <- as.data.frame(round(counts(dds2, normalized=TRUE),2))
+raw_counts.1617 <- as.data.frame(counts(dds2))
+
+# save to file
+write.csv(normalized_counts.1617, "counts/etec-1617_normalized-counts.csv")
+write.csv(raw_counts.1617, "counts/etec-1617_raw-counts.csv")
+
+```
+
+
+### DE Analysis
+
+> Alpha = 0.05
+
+| control | WTminus  |
+|---------|----------|
+| trt1    | GZPminus |
+| trt2    | WTplus   |
+| trt3    | GZPplus  |
+| trt3    | control  |
+| trt3    | trt2     | 
+
+
+
+| condition 1 | condition2 | test  |
+|-------------|------------|-------|
+| trt2        | control    | test1 |
+| trt3        | trt1       | test2 |
+| trt1        | control    | test3 |
+| trt3        | control    | test4 |
+| trt3        | trt2       | test5 |
+
+#### T1: TRT_2 vs. control
+```{r}
+# calculate results at alpha = 0.05
+res_t1 <- results(dds2,
+               contrast=c("group","treatment_2","control"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_t1
+```
+
+##### Summary
+
+```{r}
+summary(res_t1)
+sum(res_t1$padj < 0.05, na.rm = TRUE)
+
+mcols(res_t1)$description
+```
+
+> 1181 transcripts with p-adj values less than 0.05, implying 1181 transcripts of 4671 have high confidence LFC values across Treatment 2 and control conditions.
+
+
+##### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_t1_ordered <- res_t1[order(res_t1$padj),]
+
+res_t1_sig05 <- as.data.frame(subset(res_t1_ordered, padj < 0.05))
+nrow(res_t1_sig05)
+head(res_t1_sig05, n=10)
+
+```
+
+##### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_t1_sig05_txids <- data.frame(tx_id = rownames(res_t1_sig05))
+
+write_tsv(res_t1_sig05_txids,
+          "./deg_lists/etec_1617/test1/etec-1617_deseq2_WTplus-v-WTminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_t1_sig05,
+          "./deg_lists/etec_1617/test1/etec-1617_deseq2_WTplus-v-WTminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_t1_sig05.lfc_1 <- as.data.frame(subset(res_t1_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_t1_sig05.lfc_1,
+          file = "./deg_lists/etec_1617/test1/etec-1617_deseq2_WTplus-v-WTminus_alpha-05_LFC-1.csv")
+
+```
+
+##### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_t1_all<- as.data.frame(res_t1)
+nrow(res_t1_all)
+head(res_t1_all, n=10)
+
+# write to file
+write.csv(res_t1_all,
+          file = "./deg_lists/etec_1617/test1/etec-1617_deseq2_WTplus-v-WTminus_alpha-05_all-genes.csv")
+```
+
+#### T2: TRT_3 vs. TRT_1
+```{r}
+# calculate results at alpha = 0.05
+res_t2 <- results(dds2,
+               contrast=c("group","treatment_3","treatment_1"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_t2
+```
+
+##### Summary
+
+```{r}
+summary(res_t2)
+sum(res_t2$padj < 0.05, na.rm = TRUE)
+sum(res_t2$padj < 0.01, na.rm = TRUE)
+
+mcols(res_t2)$description
+```
+
+> 44 transcripts with p-adj values less than 0.05, implying 44 transcripts of 4671 have high confidence LFC values across Treatment 3 and Treatment 1 conditions.
+
+
+##### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_t2_ordered <- res_t2[order(res_t2$padj),]
+
+res_t2_sig05 <- as.data.frame(subset(res_t2_ordered, padj < 0.05))
+nrow(res_t2_sig05)
+head(res_t2_sig05, n=10)
+
+```
+
+##### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_t2_sig05_txids <- data.frame(tx_id = rownames(res_t2_sig05))
+
+write_tsv(res_t2_sig05_txids,
+          "./deg_lists/etec_1617/test2/etec-1617_deseq2_GZPplus-v-GZPminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_t2_sig05,
+          "./deg_lists/etec_1617/test2/etec-1617_deseq2_GZPplus-v-GZPminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_t2_sig05.lfc_1 <- as.data.frame(subset(res_t2_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_t2_sig05.lfc_1,
+          file = "./deg_lists/etec_1617/test2/etec-1617_deseq2_GZPplus-v-GZPminus_alpha-05_LFC-1.csv")
+
+```
+
+##### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_t2_all<- as.data.frame(res_t2)
+nrow(res_t2_all)
+head(res_t2_all, n=10)
+
+# write to file
+write.csv(res_t2_all,
+          file = "./deg_lists/etec_1617/test2/etec-1617_deseq2_GZPplus-v-GZPminus_alpha-05_all-genes.csv")
+```
+
+
+
+#### T3: TRT_1 vs. control
+```{r}
+# calculate results at alpha = 0.05
+res_t3 <- results(dds2,
+               contrast=c("group","treatment_1","control"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_t3
+```
+
+##### Summary
+
+```{r}
+summary(res_t3)
+sum(res_t3$padj < 0.05, na.rm = TRUE)
+
+mcols(res_t3)$description
+```
+
+> 61 transcripts with p-adj values less than 0.05, implying 61 transcripts of 4671 have high confidence LFC values across Treatment 1 and control conditions.
+
+
+
+##### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_t3_ordered <- res_t3[order(res_t3$padj),]
+
+res_t3_sig05 <- as.data.frame(subset(res_t3_ordered, padj < 0.05))
+nrow(res_t3_sig05)
+head(res_t3_sig05, n=10)
+
+```
+
+##### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_t3_sig05_txids <- data.frame(tx_id = rownames(res_t3_sig05))
+
+write_tsv(res_t3_sig05_txids,
+          "./deg_lists/etec_1617/test3/etec-1617_deseq2_GZPminus-v-WTminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_t3_sig05,
+          "./deg_lists/etec_1617/test3/etec-1617_deseq2_GZPminus-v-WTminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_t3_sig05.lfc_1 <- as.data.frame(subset(res_t3_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_t3_sig05.lfc_1,
+          file = "./deg_lists/etec_1617/test3/etec-1617_deseq2_GZPminus-v-WTminus_alpha-05_LFC-1.csv")
+
+```
+
+##### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_t3_all<- as.data.frame(res_t3)
+nrow(res_t3_all)
+head(res_t3_all, n=10)
+
+# write to file
+write.csv(res_t3_all,
+          file = "./deg_lists/etec_1617/test3/etec-1617_deseq2_GZPminus-v-WTminus_alpha-05_all-genes.csv")
+```
+
+
+#### T4: TRT_3 vs. control
+```{r}
+# calculate results at alpha = 0.05
+res_t4 <- results(dds2,
+               contrast=c("group","treatment_3","control"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_t4
+```
+
+##### Summary
+
+```{r}
+summary(res_t4)
+sum(res_t4$padj < 0.05, na.rm = TRUE)
+
+mcols(res_t4)$description
+```
+
+> 161 transcripts with p-adj values less than 0.05, implying 161 transcripts of 4671 have high confidence LFC values across Treatment 3 and control conditions.
+
+
+
+##### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_t4_ordered <- res_t4[order(res_t4$padj),]
+
+res_t4_sig05 <- as.data.frame(subset(res_t4_ordered, padj < 0.05))
+nrow(res_t4_sig05)
+head(res_t4_sig05, n=10)
+
+```
+
+##### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_t4_sig05_txids <- data.frame(tx_id = rownames(res_t4_sig05))
+
+write_tsv(res_t4_sig05_txids,
+          "./deg_lists/etec_1617/test4/etec-1617_deseq2_GZPplus-v-WTminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_t4_sig05,
+          "./deg_lists/etec_1617/test4/etec-1617_deseq2_GZPplus-v-WTminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_t4_sig05.lfc_1 <- as.data.frame(subset(res_t4_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_t4_sig05.lfc_1,
+          file = "./deg_lists/etec_1617/test4/etec-1617_deseq2_GZPplus-v-WTminus_alpha-05_LFC-1.csv")
+
+```
+
+##### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_t4_all<- as.data.frame(res_t4)
+nrow(res_t4_all)
+head(res_t4_all, n=10)
+
+# write to file
+write.csv(res_t4_all,
+          file = "./deg_lists/etec_1617/test4/etec-1617_deseq2_GZPplus-v-WTminus_alpha-05_all-genes.csv")
+```
+
+
+
+
+
+#### T5: TRT_3 vs. TRT_2
+```{r}
+# calculate results at alpha = 0.05
+res_t5 <- results(dds2,
+               contrast=c("group","treatment_3","treatment_2"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_t5
+```
+
+##### Summary
+
+```{r}
+summary(res_t5)
+sum(res_t5$padj < 0.05, na.rm = TRUE)
+
+mcols(res_t5)$description
+```
+
+> 468 transcripts with p-adj values less than 0.05, implying 468 transcripts of 4671 have high confidence LFC values across treatment 3 and treatment 2 conditions.
+
+
+
+##### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_t5_ordered <- res_t5[order(res_t5$padj),]
+
+res_t5_sig05 <- as.data.frame(subset(res_t5_ordered, padj < 0.05))
+nrow(res_t5_sig05)
+head(res_t5_sig05, n=10)
+
+```
+
+##### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_t5_sig05_txids <- data.frame(tx_id = rownames(res_t5_sig05))
+
+write_tsv(res_t5_sig05_txids,
+          "./deg_lists/etec_1617/test5/etec-1617_deseq2_GZPplus-v-WTplus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_t5_sig05,
+          "./deg_lists/etec_1617/test5/etec-1617_deseq2_GZPplus-v-WTplus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_t5_sig05.lfc_1 <- as.data.frame(subset(res_t5_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_t5_sig05.lfc_1,
+          file = "./deg_lists/etec_1617/test5/etec-1617_deseq2_GZPplus-v-WTplus_alpha-05_LFC-1.csv")
+
+```
+
+##### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_t5_all<- as.data.frame(res_t5)
+nrow(res_t5_all)
+head(res_t5_all, n=10)
+
+# write to file
+write.csv(res_t5_all,
+          file = "./deg_lists/etec_1617/test5/etec-1617_deseq2_GZPplus-v-WTplus_alpha-05_all-genes.csv")
+```
+
+
+
+
+
+
+
+

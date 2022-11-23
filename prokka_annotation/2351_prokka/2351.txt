@@ -1,0 +1,8 @@
+organism: Genus species 2351 
+contigs: 174
+bases: 5171818
+tRNA: 82
+CDS: 4870
+sig_peptide: 455
+tmRNA: 1
+rRNA: 9

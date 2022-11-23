@@ -1,0 +1,13 @@
+sample,strain,fastq_id,group
+J12_GZP5_plus,1617,J12_GZP5_plus_S8,treatment_3
+J2_WT2_minus,1617,J2_WT2_minus_S1,control
+J28_WT_minus_B,1617,J28_WT_minus_B_S9,control
+J29_WT_plus_A,1617,J29_WT_plus_A_S10,treatment_2
+J3_WT3_minus,1617,J3_WT3_minus_S2,control
+J31_GZP_plus_A,1617,J31_GZP_plus_A_S11,treatment_3
+J32_GZP_plus_B,1617,J32_GZP_plus_B_S12,treatment_3
+J4_GZP1_minus,1617,J4_GZP1_minus_S3,treatment_1
+J5_GZP2_minus,1617,J5_GZP2_minus_S4,treatment_1
+J6_GZP3_minus,1617,J6_GZP3_minus_S5,treatment_1
+J8_WT4_plus,1617,J8_WT4_plus_S6,treatment_2
+J9_WT5_plus,1617,J9_WT5_plus_S7,treatment_2

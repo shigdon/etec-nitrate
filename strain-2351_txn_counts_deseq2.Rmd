@@ -1,0 +1,669 @@
+---
+title: "strain-2351_txn_counts_deseq2"
+author: "Shawn Higdon"
+date: "2022-11-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+```{r, message=FALSE, include=FALSE}
+packages <- c("DESeq2", "BiocParallel", "edgeR", "tidyverse")
+
+lapply(packages, library, character.only = TRUE)
+```
+
+
+## Sample map
+```{r}
+sample.map.2351 <- read_csv("./metadata/sample_map_2351.csv", col_names = TRUE)
+sample.map.2351
+```
+
+
+## Import raw counts
+
+> Define function to read in and assemble raw count feature tables for all 3 salmon-cdhit aggregated transcriptome raw count data sets.
+
+
+```{r, message=FALSE}
+
+# Define function
+read_quant <- function (value) {
+  
+  ## define sample IDS
+  sampID <- sample.map.2351$sample
+
+  ## make list of file pahts
+  paths <<- list.files(path = paste0("counts/quant_",value),
+                      pattern = "*.counts",
+                      recursive = T, full.names = T)
+  
+  ## make list object of count tables
+  list <- lapply(paths, read_tsv)
+  
+  ## add column to every dataframe indicating the sample
+  list <- mapply(cbind, list, "sample" = sampID, SIMPLIFY = F)
+  
+  ## Create one dataframe with raw transcript counts for all 6 samples
+  df <- do.call("rbind", list)
+  
+  ## spread from long to wide format feature table & save to global env
+  df.wide <- assign(paste0("count_",value,"_df.wide"),
+                    spread(df, key = sample, value = count),
+                    envir = .GlobalEnv)
+
+}
+
+# make list of CDHIT threshold values used to aggregate each sample denovo txome into a single txome
+strains <- c("2351") # host CDHIT threshold = 1
+
+# execute the function on all 3 datasets
+for (i in strains) {
+  print(i)
+  read_quant(i)
+}
+
+# reorder columns
+
+count_2351_df.wide <- select(count_2351_df.wide,
+                             'transcript',
+                             'WT1-',
+                             'PZGH1-',
+                             'PZGH2-',
+                             'PZGH3-',
+                             'PZGH1+',
+                             'PZGH2+',
+                             'PZGH3+',
+                             'WT2-',
+                             'WT3-',
+                             'WT1+',
+                             'WT2+',
+                             'WT3+')
+
+```
+
+
+
+
+## DESeq2
+
+### Format data
+
+> * Critical for column name order of count matrix and row name in column metadata table are in conserved order.
+
+```{r}
+
+# define raw count matrix
+cts.2351 <- as.data.frame(count_2351_df.wide, row.names = count_2351_df.wide$transcript)[,2:13]
+cts.2351.mat <- as.matrix(cts.2351)
+head(cts.2351.mat, 2)
+
+# define sample data (coldata) data frame
+coldata.2351 <- sample.map.2351 %>% select(sample, group, strain)
+coldata.2351 <- as.data.frame(coldata.2351)
+rownames(coldata.2351) <- coldata.2351$sample
+coldata.2351 <- coldata.2351[,-1]
+coldata.2351$group <- factor(coldata.2351$group)
+coldata.2351$strain <- factor(coldata.2351$strain)
+str(coldata.2351)
+
+# test sample order in count matrix and coldata table
+all(rownames(coldata.2351) %in% colnames(cts.2351.mat))
+all(rownames(coldata.2351) == colnames(cts.2351.mat))
+```
+
+### Create DESeq Dataset
+
+```{r}
+dds.2351 <- DESeqDataSetFromMatrix(countData = round(cts.2351.mat),
+                              colData = coldata.2351,
+                              design = ~ group)
+dds.2351
+```
+
+> 4926 transcripts across 12 samples
+
+
+### Pre-filtering
+
+> Keep rows (transcripts) that have at least 10 reads total
+
+```{r}
+keep <- rowSums(counts(dds.2351)) >= 10
+dds2.2351 <- dds.2351[keep,]
+```
+
+> Resulting reduction from 4,926 to 4,918 transcripts (8 transcripts removed) with ≥ 10 total counts across 12 samples.
+
+### Viz
+
+> Transform raw count data
+
+```{r}
+vsd.2351 <- vst(dds2.2351, blind = FALSE)
+head(assay(vsd.2351),3)
+```
+
+
+#### PCA
+```{r}
+library(ggrepel)
+
+pca.2351 <- plotPCA(vsd.2351, intgroup=c("group"))
+
+pca.2351 + geom_text_repel(aes(label = name))
+  
+```
+
+
+### REMOVE OUTLIERS
+
+> GH1+ and GH1-
+
+```{r}
+count_2351_df.wide2 <- count_2351_df.wide |> select(-'PZGH1+', -'PZGH1-')
+```
+
+
+### RERUN
+
+> Data format QC
+
+**Critical for column name order of count matrix and row name in column metadata table are in conserved order.**
+
+```{r}
+# define raw count matrix
+cts.2351_2 <- as.data.frame(count_2351_df.wide2, row.names = count_2351_df.wide2$transcript)[,2:11]
+cts.2351.mat_2 <- as.matrix(cts.2351_2)
+head(cts.2351.mat_2, 2)
+
+# define sample data (coldata) data frame && remove the 2 samples from the coldata
+coldata.2351_2 <- sample.map.2351 %>% select(sample, group, strain) %>% filter(sample != 'PZGH1+' &
+                                                                                 sample != 'PZGH1-')
+coldata.2351_2 <- as.data.frame(coldata.2351_2)
+rownames(coldata.2351_2) <- coldata.2351_2$sample
+coldata.2351_2 <- coldata.2351_2[,-1]
+coldata.2351_2$group <- factor(coldata.2351_2$group)
+coldata.2351_2$strain <- factor(coldata.2351_2$strain)
+str(coldata.2351_2)
+
+# test sample order in count matrix and coldata table
+all(rownames(coldata.2351_2) %in% colnames(cts.2351.mat_2))
+all(rownames(coldata.2351_2) == colnames(cts.2351.mat_2))
+```
+
+#### Create DESeq Dataset
+
+```{r}
+dds.2351_2 <- DESeqDataSetFromMatrix(countData = round(cts.2351.mat_2),
+                              colData = coldata.2351_2,
+                              design = ~ group)
+dds.2351_2
+```
+> 4926 transcripts across 10 samples
+
+#### Pre-filtering
+
+> Keep rows (transcripts) that have at least 10 reads total
+
+```{r}
+keep <- rowSums(counts(dds.2351_2)) >= 10
+dds.2351_2f <- dds.2351_2[keep,]
+```
+
+> Resulting reduction from 4,926 to 4,918 transcripts (8 transcripts removed) with ≥ 10 total counts across 10 samples.
+
+#### Viz
+
+> Transform raw count data
+
+```{r}
+vsd.2351_2 <- vst(dds.2351_2f, blind = FALSE)
+head(assay(vsd.2351_2),3)
+```
+
+
+##### PCA
+```{r}
+library(ggrepel)
+
+pca.2351_2 <- plotPCA(vsd.2351_2, intgroup=c("group"))
+
+pca.2351_2 + geom_text_repel(aes(label = name))
+  
+```
+
+
+#### Export counts
+
+```{r}
+# export as df
+normalized_counts <- as.data.frame(round(counts(dds.2351_2f, normalized=TRUE),2))
+raw_counts <- as.data.frame(counts(dds.2351_2f))
+
+# save to file
+write.csv(normalized_counts, "counts/etec-2351_normalized-counts.csv")
+write.csv(raw_counts, "counts/etec-2351_raw-counts.csv")
+
+```
+
+
+#### DE Analysis
+
+> 5 comparisons
+>
+> * WT+ vs WT-
+> * PZGH+ vs PZGH-
+> * PZGH- vs WT-
+> * PZGH+ vs WT-
+> * PZGH+ vs WT+
+
+> Alpha = 0.05
+
+##### T1: WT+ vs WT-
+```{r}
+library(BiocParallel)
+dds.2351_2f <- DESeq(dds.2351_2f, parallel = TRUE, BPPARAM = MulticoreParam(6))
+
+# calculate results at alpha = 0.05
+res_2351.t1 <- results(dds.2351_2f,
+               contrast=c("group","WT_plus","WT_minus"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_2351.t1
+```
+
+###### Summary
+
+```{r}
+summary(res_2351.t1)
+sum(res_2351.t1$padj < 0.05, na.rm = TRUE)
+
+mcols(res_2351.t1)$description
+```
+
+> 1796 transcripts with p-adj values less than 0.05, implying 1796 transcripts of 4918 have high confidence LFC values across WT+ and WT- conditions.
+
+
+###### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_2351.t1_ordered <- res_2351.t1[order(res_2351.t1$padj),]
+
+res_2351.t1_sig05 <- as.data.frame(subset(res_2351.t1_ordered, padj < 0.05))
+nrow(res_2351.t1_sig05)
+head(res_2351.t1_sig05, n=10)
+```
+
+###### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_2351.t1_sig05_txids <- data.frame(tx_id = rownames(res_2351.t1_sig05))
+
+write_tsv(res_2351.t1_sig05_txids,
+          "./deg_lists/etec_2351/test1/etec-2351_deseq2_WTplus-v-WTminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_2351.t1_sig05,
+          "./deg_lists/etec_2351/test1/etec-2351_deseq2_WTplus-v-WTminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_2351.t1_sig05.lfc_1 <- as.data.frame(subset(res_2351.t1_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_2351.t1_sig05.lfc_1,
+          file = "./deg_lists/etec_2351/test1/etec-2351_deseq2_WTplus-v-WTminus_alpha-05_LFC-1.csv")
+
+```
+
+###### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_2351.t1_all<- as.data.frame(res_2351.t1)
+nrow(res_2351.t1_all)
+head(res_2351.t1_all, n=10)
+
+# write to file
+write.csv(res_2351.t1_all,
+          file = "./deg_lists/etec_2351/test1/etec-2351_deseq2_WTplus-v-WTminus_alpha-05_all-genes.csv")
+```
+
+
+##### T2: PZGH+ vs PZGH-
+```{r}
+# calculate results at alpha = 0.05
+res_2351.t2 <- results(dds.2351_2f,
+               contrast=c("group","PZGH_plus","PZGH_minus"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_2351.t2
+```
+
+###### Summary
+
+```{r}
+summary(res_2351.t2)
+sum(res_2351.t2$padj < 0.05, na.rm = TRUE)
+
+mcols(res_2351.t2)$description
+```
+
+> 243 transcripts with p-adj values less than 0.05, suggesting 243 transcripts of the 4918 have high confidence LFC values when contrasting PZGH+ and PZGH- conditions.
+
+
+###### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_2351.t2_ordered <- res_2351.t2[order(res_2351.t2$padj),]
+
+res_2351.t2_sig05 <- as.data.frame(subset(res_2351.t2_ordered, padj < 0.05))
+nrow(res_2351.t2_sig05)
+head(res_2351.t2_sig05, n=10)
+```
+
+###### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_2351.t2_sig05_txids <- data.frame(tx_id = rownames(res_2351.t2_sig05))
+
+write_tsv(res_2351.t2_sig05_txids,
+          "./deg_lists/etec_2351/test2/etec-2351_deseq2_PZGHplus-v-PZGHminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_2351.t2_sig05,
+          "./deg_lists/etec_2351/test2/etec-2351_deseq2_PZGHplus-v-PZGHminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_2351.t2_sig05.lfc_1 <- as.data.frame(subset(res_2351.t2_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_2351.t2_sig05.lfc_1,
+          file = "./deg_lists/etec_2351/test2/etec-2351_deseq2_PZGHplus-v-PZGHminus_alpha-05_LFC-1.csv")
+
+```
+
+###### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_2351.t2_all<- as.data.frame(res_2351.t2)
+nrow(res_2351.t2_all)
+head(res_2351.t2_all, n=10)
+
+# write to file
+write.csv(res_2351.t2_all,
+          file = "./deg_lists/etec_2351/test2/etec-2351_deseq2_PZGHplus-v-PZGHminus_alpha-05_all-genes.csv")
+```
+
+
+
+##### T3: PZGH- vs WT-
+```{r}
+# calculate results at alpha = 0.05
+res_2351.t3 <- results(dds.2351_2f,
+               contrast=c("group", "PZGH_minus", "WT_minus"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_2351.t3
+```
+
+###### Summary
+
+```{r}
+summary(res_2351.t3)
+sum(res_2351.t3$padj < 0.05, na.rm = TRUE)
+
+mcols(res_2351.t3)$description
+```
+
+> 353 transcripts with p-adj values less than 0.05, suggesting 353 transcripts of the 4918 have high confidence LFC values when contrasting PZGH- and WT- conditions.
+
+
+###### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_2351.t3_ordered <- res_2351.t3[order(res_2351.t3$padj),]
+
+res_2351.t3_sig05 <- as.data.frame(subset(res_2351.t3_ordered, padj < 0.05))
+nrow(res_2351.t3_sig05)
+head(res_2351.t3_sig05, n=10)
+```
+
+###### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_2351.t3_sig05_txids <- data.frame(tx_id = rownames(res_2351.t3_sig05))
+
+write_tsv(res_2351.t3_sig05_txids,
+          "./deg_lists/etec_2351/test3/etec-2351_deseq2_PZGHminus-v-WTminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_2351.t3_sig05,
+          "./deg_lists/etec_2351/test3/etec-2351_deseq2_PZGHminus-v-WTminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_2351.t3_sig05.lfc_1 <- as.data.frame(subset(res_2351.t3_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_2351.t3_sig05.lfc_1,
+          file = "./deg_lists/etec_2351/test3/etec-2351_deseq2_PZGHminus-v-WTminus_alpha-05_LFC-1.csv")
+
+```
+
+###### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_2351.t3_all<- as.data.frame(res_2351.t3)
+nrow(res_2351.t3_all)
+head(res_2351.t3_all, n=10)
+
+# write to file
+write.csv(res_2351.t3_all,
+          file = "./deg_lists/etec_2351/test3/etec-2351_deseq2_PZGHminus-v-WTminus_alpha-05_all-genes.csv")
+```
+
+
+
+##### T4: PZGH+ vs WT-
+```{r}
+# calculate results at alpha = 0.05
+res_2351.t4 <- results(dds.2351_2f,
+               contrast=c("group","PZGH_plus","WT_minus"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_2351.t4
+```
+
+###### Summary
+
+```{r}
+summary(res_2351.t4)
+sum(res_2351.t4$padj < 0.05, na.rm = TRUE)
+
+mcols(res_2351.t4)$description
+```
+
+> 1362 transcripts with p-adj values less than 0.05, suggesting 1362 transcripts of the 4918 have high confidence LFC values when contrasting PZGH+ and WT- conditions.
+
+
+###### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_2351.t4_ordered <- res_2351.t4[order(res_2351.t4$padj),]
+
+res_2351.t4_sig05 <- as.data.frame(subset(res_2351.t4_ordered, padj < 0.05))
+nrow(res_2351.t4_sig05)
+head(res_2351.t4_sig05, n=10)
+```
+
+###### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_2351.t4_sig05_txids <- data.frame(tx_id = rownames(res_2351.t4_sig05))
+
+write_tsv(res_2351.t4_sig05_txids,
+          "./deg_lists/etec_2351/test4/etec-2351_deseq2_PZGHplus-v-WTminus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_2351.t4_sig05,
+          "./deg_lists/etec_2351/test4/etec-2351_deseq2_PZGHplus-v-WTminus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_2351.t4_sig05.lfc_1 <- as.data.frame(subset(res_2351.t4_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_2351.t4_sig05.lfc_1,
+          file = "./deg_lists/etec_2351/test4/etec-2351_deseq2_PZGHplus-v-WTminus_alpha-05_LFC-1.csv")
+
+```
+
+###### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_2351.t4_all<- as.data.frame(res_2351.t4)
+nrow(res_2351.t4_all)
+head(res_2351.t4_all, n=10)
+
+# write to file
+write.csv(res_2351.t4_all,
+          file = "./deg_lists/etec_2351/test4/etec-2351_deseq2_PZGHplus-v-WTminus_alpha-05_all-genes.csv")
+```
+
+
+
+
+##### T5: PZGH+ vs WT+
+```{r}
+# calculate results at alpha = 0.05
+res_2351.t5 <- results(dds.2351_2f,
+               contrast=c("group","PZGH_plus","WT_plus"),
+               alpha = 0.05,
+               parallel = TRUE,
+               BPPARAM = MulticoreParam(6))
+res_2351.t5
+```
+
+###### Summary
+
+```{r}
+summary(res_2351.t5)
+sum(res_2351.t5$padj < 0.05, na.rm = TRUE)
+
+mcols(res_2351.t5)$description
+```
+
+> 1530 transcripts with p-adj values less than 0.05, suggesting 1530 transcripts of the 4918 have high confidence LFC values when contrasting PZGH+ and WT+ conditions.
+
+
+###### Rank transcripts
+
+> reorder the list of transcript LFC results based on p-adj values
+
+```{r}
+res_2351.t5_ordered <- res_2351.t5[order(res_2351.t5$padj),]
+
+res_2351.t5_sig05 <- as.data.frame(subset(res_2351.t5_ordered, padj < 0.05))
+nrow(res_2351.t5_sig05)
+head(res_2351.t5_sig05, n=10)
+```
+
+###### Export Transcript List and DEG lists
+
+```{r}
+# Transcript list
+res_2351.t5_sig05_txids <- data.frame(tx_id = rownames(res_2351.t5_sig05))
+
+write_tsv(res_2351.t5_sig05_txids,
+          "./deg_lists/etec_2351/test5/etec-2351_deseq2_PZGHplus-v-WTplus_alpha-05_txids.tsv",
+          col_names = FALSE)
+
+# DEG List p-adj ≤ 0.05
+write.csv(res_2351.t5_sig05,
+          "./deg_lists/etec_2351/test5/etec-2351_deseq2_PZGHplus-v-WTplus_alpha-05_DEGtable.csv")
+
+# Subset DEGs with -1 ≤ LFC ≤ 1
+res_2351.t5_sig05.lfc_1 <- as.data.frame(subset(res_2351.t5_sig05,
+                                                log2FoldChange <= -1 | log2FoldChange >= 1)
+                                         )
+
+write.csv(res_2351.t5_sig05.lfc_1,
+          file = "./deg_lists/etec_2351/test5/etec-2351_deseq2_PZGHplus-v-WTplus_alpha-05_LFC-1.csv")
+
+```
+
+###### Export all transcript comparisons
+
+```{r}
+# create dataframe of DESeq2 stats for the comparison
+res_2351.t5_all<- as.data.frame(res_2351.t5)
+nrow(res_2351.t5_all)
+head(res_2351.t5_all, n=10)
+
+# write to file
+write.csv(res_2351.t5_all,
+          file = "./deg_lists/etec_2351/test5/etec-2351_deseq2_PZGHplus-v-WTplus_alpha-05_all-genes.csv")
+```
+
+
+
+### Pending Tasks
+
+[?] make the complete tables in excel
+  [x] generating dataframes for all the transcripts for each test
+  [x] df for raw counts
+  [x] df for normalized counts
+[x] generate subset of all DE transcripts per comparison with LFC ≥ 1 or LFC ≤ -1
+[?] test if T2 transcripts with LFC > 1 are in the WT comparison
+[?] finish the other 2 comparisons for strain 1617
+[?] Venn Diagram style plot -- potatially with UpsetR; values are transcript IDs
+[?] put prokka annotation files on github
+[?] push it all to github
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
